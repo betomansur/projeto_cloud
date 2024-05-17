@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Criação de uma VPC com uma instância EC2 configurada com Auto Scaling, políticas de escalabilidade baseadas em CloudWatch Alarms e integração do ASG com o ALB através do Target Group.
+
+Parameters:
+  KeyName:
+    Description: Nome da chave SSH para acessar a instância EC2
+    Type: String
+    Default: my-new-key  # Nome do arquivo que foi criada a chave para as maquinas EC2
+  InstanceType:
+    Description: Tipo de instância EC2
+    Type: String
+    Default: t2.micro 
+
+Resources:
+  # Criação da VPC
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16  
+      Tags:
+        - Key: Name
+          Value: MyVPC 
+
+  # Criação do Internet Gateway
+  MyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyInternetGateway 
+
+  # Associação do Internet Gateway à VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC 
+      InternetGatewayId: !Ref MyInternetGateway
+
+  # Criação da primeira Subnet pública
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC  
+      CidrBlock: 10.0.1.0/24 
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]  
+      MapPublicIpOnLaunch: true  
+      Tags:
+        - Key: Name
+          Value: MyPublicSubnet1
+
+  # Criação da segunda Subnet pública
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC 
+      CidrBlock: 10.0.2.0/24 
+      AvailabilityZone: !Select [ 1, !GetAZs '' ] 
+      MapPublicIpOnLaunch: true 
+      Tags:
+        - Key: Name
+          Value: MyPublicSubnet2 
+
+  # Criação da Subnet privada
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC 
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]  
+      MapPublicIpOnLaunch: false  
+      Tags:
+        - Key: Name
+          Value: MyPrivateSubnet  # Tag para nomear a Subnet
+
+  # Criação da Tabela de Roteamento Pública
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable 
+
+  # Criação da rota para a Internet na Tabela de Roteamento Pública
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable  
+      DestinationCidrBlock: 0.0.0.0/0  
+      GatewayId: !Ref MyInternetGateway  
+
+  # Associação da primeira Subnet pública com a Tabela de Roteamento Pública
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  # Associação da segunda Subnet pública com a Tabela de Roteamento Pública
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Criação do Grupo de Segurança para a instância EC2
+  MyEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir trafego para a instancia EC2 
+      VpcId: !Ref MyVPC 
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0 
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0 
+
+  # Criação do Grupo de Segurança para o ALB
+  MyALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir trafego HTTP para o ALB  
+      VpcId: !Ref MyVPC 
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+
+  # Criação do ALB
+  MyALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: MyALB  
+      Subnets:
+        - !Ref PublicSubnet1 
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref MyALBSecurityGroup  
+      Scheme: internet-facing  
+
+  # Criação do Listener do ALB
+  MyALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MyTargetGroup  
+      LoadBalancerArn: !Ref MyALB 
+      Port: 80  
+      Protocol: HTTP 
+
+  # Criação da Launch Configuration para Auto Scaling
+  MyEC2LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-0505937d1f3185a61  # ID da AMI de Linux
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName  
+      SecurityGroups:
+        - !Ref MyEC2SecurityGroup  
+
+  # Criação do Auto Scaling Group
+  MyAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet  
+      LaunchConfigurationName: !Ref MyEC2LaunchConfiguration  
+      MinSize: '1'  # Tamanho mínimo
+      MaxSize: '3'  # Tamanho máximo
+      DesiredCapacity: '2'  # Capacidade desejada
+      TargetGroupARNs:
+        - !Ref MyTargetGroup  
+
+  # Criação da Política de Auto Scaling
+  MyScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup  
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+  # Criação do Alarme do CloudWatch
+  MyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarme para monitorar a CPU Utilization da instância
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref MyAutoScalingGroup  
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '70' #70% Para estourar o alarme
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref MyScalingPolicy  
+
+  # Criação da tabela DynamoDB
+  MyDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: MyDynamoDBTable  # Nome da tabela
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S 
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH 
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'  
+
+  # Criação do Target Group para o ALB
+  MyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance  
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref MyVPC 
+
+Outputs:
+  VpcId:
+    Description: ID da VPC criada
+    Value: !Ref MyVPC  
+  DynamoDBTableName:
+    Description: Nome da tabela DynamoDB criada
+    Value: !Ref MyDynamoDBTable  
+  ALBDNSName:
+    Description: DNS do ALB
+    Value: !GetAtt MyALB.DNSName  
